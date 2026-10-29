@@ -1,17 +1,19 @@
 //! stats-lite: CPU + disk % in the menu bar. No settings, no charts.
 //!
 //! The title only changes when a number changes, so an idle machine costs no
-//! WindowServer redraws.
+//! WindowServer redraws. It checks for updates itself: see `update`.
 
 use std::{cell::RefCell, time::Duration};
+
+mod update;
 
 use objc2::{
     AnyThread, ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
     runtime::AnyObject, sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSAttributedStringAttachmentConveniences, NSFont, NSFontAttributeName, NSImage,
-    NSMenu, NSMenuItem, NSStatusBar, NSStatusBarButton, NSTextAttachment,
+    NSAlert, NSApplication, NSAttributedStringAttachmentConveniences, NSFont, NSFontAttributeName,
+    NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusBarButton, NSTextAttachment,
     NSVariableStatusItemLength,
 };
 use objc2_foundation::{
@@ -31,6 +33,12 @@ const FONT_SIZE: f64 = 13.0;
 const ICON_HEIGHT: f64 = 13.0;
 /// Nudges the icon down onto the digits' baseline; tuned against a screenshot.
 const ICON_Y_OFFSET: f64 = -2.0;
+/// A download's progress is re-read this often while it runs.
+pub(crate) const UPDATE_POLL: Duration = Duration::from_millis(100);
+/// First update check, in ticks: after launch, so it never competes with startup.
+const FIRST_CHECK_TICK: u64 = 3;
+/// Re-check every 6h: a menu bar stays up for days, and one wakeup in hours is enough.
+const CHECK_EVERY_TICKS: u64 = 10_800;
 
 struct Sampler {
     sys: System,
@@ -43,6 +51,10 @@ struct Sampler {
     font: Retained<NSFont>,
     cpu_icon: Option<Retained<NSTextAttachment>>,
     disk_icon: Option<Retained<NSTextAttachment>>,
+    /// The update menu item, `mem::forget`-ed at startup: the menu retains it.
+    update_item: *const NSMenuItem,
+    last_update_title: String,
+    update_is_restart: bool,
 }
 
 thread_local! {
@@ -103,6 +115,10 @@ fn on_tick() {
         let Some(sampler) = sampler.as_mut() else {
             return;
         };
+        // Menu actions and alerts below all run here, on the main thread.
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
         sampler.tick += 1;
         sampler.sys.refresh_cpu_usage();
         if sampler.tick % DISK_EVERY_TICKS == 0 {
@@ -116,43 +132,98 @@ fn on_tick() {
             Some(disk) => format!("{cpu}|{disk}"),
             None => format!("{cpu}|-"),
         };
-        if key == sampler.last_title {
-            return;
-        }
-        sampler.last_title = key;
+        if key != sampler.last_title {
+            sampler.last_title = key;
 
-        // Monospaced digits, right-aligned to width 3: 5% -> 100% never bounces
-        // the neighbouring menu-bar icons around.
-        let title = NSMutableAttributedString::new();
-        title.appendAttributedString(&icon_run(sampler.cpu_icon.as_deref(), "CPU"));
-        title.appendAttributedString(&text_run(&format!(" {cpu:>3}%  ")));
-        title.appendAttributedString(&icon_run(sampler.disk_icon.as_deref(), "D"));
-        let disk_text = match disk {
-            Some(disk) => format!(" {disk:>3}%"),
-            // Em dash, never 0%: a missing volume must not read as empty.
-            None => String::from(" \u{2014}"),
-        };
-        title.appendAttributedString(&text_run(&disk_text));
-        // SAFETY: `NSFontAttributeName` takes an `NSFont`, which is what's passed.
-        unsafe {
-            title.addAttribute_value_range(
-                NSFontAttributeName,
-                &sampler.font,
-                NSRange::new(0, title.length()),
-            );
+            // Monospaced digits, right-aligned to width 3: 5% -> 100% never bounces
+            // the neighbouring menu-bar icons around.
+            let title = NSMutableAttributedString::new();
+            title.appendAttributedString(&icon_run(sampler.cpu_icon.as_deref(), "CPU"));
+            title.appendAttributedString(&text_run(&format!(" {cpu:>3}%  ")));
+            title.appendAttributedString(&icon_run(sampler.disk_icon.as_deref(), "D"));
+            let disk_text = match disk {
+                Some(disk) => format!(" {disk:>3}%"),
+                // Em dash, never 0%: a missing volume must not read as empty.
+                None => String::from(" \u{2014}"),
+            };
+            title.appendAttributedString(&text_run(&disk_text));
+            // SAFETY: `NSFontAttributeName` takes an `NSFont`, which is what's passed.
+            unsafe {
+                title.addAttribute_value_range(
+                    NSFontAttributeName,
+                    &sampler.font,
+                    NSRange::new(0, title.length()),
+                );
+            }
+            // SAFETY: set at startup from the button that was `mem::forget`-ed
+            // (the status item retains its button), never nulled afterwards.
+            let button = unsafe { &*sampler.button };
+            button.setAttributedTitle(&title);
+            // Labels are icons now, so the tooltip (and VoiceOver) carries the words.
+            let tip = match disk {
+                Some(disk) => format!("stats-lite: CPU {cpu}%, disk {disk}%"),
+                None => format!("stats-lite: CPU {cpu}%, disk unreadable"),
+            };
+            let tip = NSString::from_str(&tip);
+            let _: () = unsafe { msg_send![button, setToolTip: &*tip] };
         }
-        // SAFETY: set at startup from the button that was `mem::forget`-ed
-        // (the status item retains its button), never nulled afterwards.
-        let button = unsafe { &*sampler.button };
-        button.setAttributedTitle(&title);
-        // Labels are icons now, so the tooltip (and VoiceOver) carries the words.
-        let tip = match disk {
-            Some(disk) => format!("stats-lite: CPU {cpu}%, disk {disk}%"),
-            None => format!("stats-lite: CPU {cpu}%, disk unreadable"),
-        };
-        let tip = NSString::from_str(&tip);
-        let _: () = unsafe { msg_send![button, setToolTip: &*tip] };
+        refresh_update_item(sampler);
+        if sampler.tick == FIRST_CHECK_TICK || sampler.tick % CHECK_EVERY_TICKS == 0 {
+            update::check_now(false);
+        }
+        match update::take_notified_outcome() {
+            Some(update::Outcome::UpToDate) => {
+                show_alert(
+                    mtm,
+                    "You're Up to Date",
+                    "stats-lite is the latest version.",
+                );
+            }
+            Some(update::Outcome::Failed(err)) => {
+                show_alert(mtm, "Couldn't Check for Updates", &err);
+            }
+            None => {}
+        }
     });
+}
+
+/// The update menu item follows the background check: title, action and enabled state.
+fn refresh_update_item(sampler: &mut Sampler) {
+    let (title, is_restart) = update::menu_status();
+    if title == sampler.last_update_title && is_restart == sampler.update_is_restart {
+        return;
+    }
+    sampler.last_update_title = title.clone();
+    sampler.update_is_restart = is_restart;
+    // SAFETY: set at startup from the item the menu retains, never nulled afterwards.
+    let item = unsafe { &*sampler.update_item };
+    item.setTitle(&NSString::from_str(&title));
+    item.setEnabled(update::menu_enabled());
+    // SAFETY: `setAction:` takes a SEL; both are implemented by `Ticker`, the target.
+    let _: () = unsafe {
+        msg_send![item, setAction: if is_restart { sel!(restartToUpdate:) } else { sel!(checkForUpdates:) }]
+    };
+}
+
+/// A modal alert; every caller runs on the main thread already.
+fn show_alert(mtm: MainThreadMarker, message: &str, info: &str) {
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(message));
+    alert.setInformativeText(&NSString::from_str(info));
+    alert.addButtonWithTitle(&NSString::from_str("OK"));
+    alert.runModal();
+}
+
+/// Installs a staged update, then terminates; an install failure aborts the quit.
+fn quit_now() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    if let Some(err) = update::install_on_quit() {
+        show_alert(mtm, "Couldn't Install the Update", &err);
+        return;
+    }
+    NSApplication::sharedApplication(mtm).terminate(None);
 }
 
 define_class!(
@@ -168,6 +239,23 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &NSTimer) {
             on_tick();
+        }
+
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: &AnyObject) {
+            update::check_now(true);
+        }
+
+        #[unsafe(method(restartToUpdate:))]
+        fn restart_to_update(&self, _sender: &AnyObject) {
+            if update::restart() {
+                quit_now();
+            }
+        }
+
+        #[unsafe(method(quit:))]
+        fn quit(&self, _sender: &AnyObject) {
+            quit_now();
         }
     }
 );
@@ -188,20 +276,34 @@ fn main() {
     // SAFETY: `setActivationPolicy:` takes an NSInteger; 1 is `NSApplicationActivationPolicyAccessory`.
     let _: bool = unsafe { msg_send![&app, setActivationPolicy: 1i64] };
 
+    // The ticker first: menu items target it, and the timer retains it. Both live
+    // until the process quits, which is exactly the app's lifetime.
+    // SAFETY: nothing beyond `NSObject`'s contract; no ivars, no `Drop`.
+    let ticker: Retained<Ticker> = unsafe { msg_send![Ticker::alloc(), init] };
+    let target = Retained::as_ptr(&ticker) as *mut AnyObject;
+    std::mem::forget(ticker);
+
     // `NSVariableStatusItemLength`: the item hugs the title, minimal menu-bar width.
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
 
-    // The only UI besides the numbers: a Quit item. No target: `terminate:` walks the
-    // responder chain up to NSApplication on its own.
+    // SAFETY: `setTarget:`/`setAction:` take an object and a SEL; the actions are
+    // implemented by `Ticker`, the target.
     let menu = NSMenu::new(mtm);
+    let update_item: Retained<NSMenuItem> = unsafe { msg_send![NSMenuItem::alloc(mtm), init] };
+    let _: () = unsafe { msg_send![&update_item, setTarget: target] };
+    let _: () = unsafe { msg_send![&update_item, setAction: sel!(checkForUpdates:)] };
+    menu.addItem(&update_item);
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
     let quit: Retained<NSMenuItem> = unsafe { msg_send![NSMenuItem::alloc(mtm), init] };
     quit.setTitle(&NSString::from_str("Quit stats-lite"));
-    // SAFETY: `setAction:` takes a SEL; `terminate:` is implemented by `NSApplication`,
-    // which the responder chain reaches because the item has no target.
-    let _: () = unsafe { msg_send![&quit, setAction: sel!(terminate:)] };
+    let _: () = unsafe { msg_send![&quit, setTarget: target] };
+    let _: () = unsafe { msg_send![&quit, setAction: sel!(quit:)] };
     quit.setKeyEquivalent(&NSString::from_str("q"));
     menu.addItem(&quit);
     item.setMenu(Some(&menu));
+    // The menu retains its items, and the item retains nothing back: see `on_tick`.
+    let update_item_ptr = Retained::as_ptr(&update_item);
+    std::mem::forget(update_item);
 
     let Some(button) = item.button(mtm) else {
         return;
@@ -226,17 +328,16 @@ fn main() {
             font,
             cpu_icon,
             disk_icon,
+            update_item: update_item_ptr,
+            last_update_title: String::new(),
+            update_is_restart: false,
         });
     });
     on_tick();
 
-    // SAFETY: the class method retains the repeating timer, and the timer retains its
-    // target; both live until the process quits, which is exactly the app's lifetime.
-    // The block-free target/selector form is used because these bindings generate no
-    // `scheduledTimerWithTimeInterval:repeats:block:`.
-    let ticker: Retained<Ticker> = unsafe { msg_send![Ticker::alloc(), init] };
-    let target = Retained::as_ptr(&ticker) as *mut AnyObject;
-    std::mem::forget(ticker);
+    // SAFETY: the class method retains the repeating timer; the target above outlives
+    // it. The block-free target/selector form is used because these bindings generate
+    // no `scheduledTimerWithTimeInterval:repeats:block:`.
     let user_info: Option<&NSObject> = None;
     let _timer: Retained<NSTimer> = unsafe {
         msg_send![

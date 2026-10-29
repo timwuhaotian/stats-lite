@@ -4,6 +4,17 @@ Notable changes to stats-lite. Versions match `Cargo.toml` and the app's Info.pl
 
 ## Unreleased
 
+## 0.2.0 — 2026-10-29
+
+- **Check for Updates….** stats-lite checks `releases/latest.toml` at launch and
+  every six hours, and whenever you ask from the menu. A newer release downloads
+  in the background (progress shows in the menu item), is checked against its
+  checksum, version, Developer ID signature and Apple notarization, then waits:
+  quitting installs it, and **Restart to Update to x.y.z** quits and reopens it.
+- **Direct download.** The release is one file,
+  [`StatsLite-arm64.dmg`](https://github.com/timwuhaotian/stats-lite/raw/main/releases/StatsLite-arm64.dmg),
+  always the latest; drag **StatsLite** to **Applications**.
+
 ## 0.1.0 — 2026-10-29
 
 - Menu-bar CPU and disk % as SF Symbol icons + monospaced numbers: CPU sampled

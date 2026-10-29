@@ -13,6 +13,15 @@ An idle machine costs nothing: CPU is sampled every 2 s (disk every 60 s), and t
 title is only rewritten when a number changes, so there are no WindowServer redraws
 at rest. (1 s polling is what made Stats burn 59% CPU watching an idle machine.)
 
+## Install
+
+Download [`StatsLite-arm64.dmg`](https://github.com/timwuhaotian/stats-lite/raw/main/releases/StatsLite-arm64.dmg),
+always the latest stats-lite, open it, and drag **StatsLite** to **Applications**.
+The app is signed with a Developer ID and notarized by Apple. From then on it keeps
+itself up to date: a new release is checked at launch and every six hours,
+downloads in the background, and installs when you quit — or right away with
+**Restart to Update** from the menu.
+
 ## Build from source
 
 You need a Mac with Apple silicon and Rust 1.94 or later.

@@ -2,3 +2,5 @@
 *.dmg binary
 *.png binary
 *.icns binary
+# Release artifacts: no diffs, and kept out of GitHub's language stats.
+releases/** linguist-generated
