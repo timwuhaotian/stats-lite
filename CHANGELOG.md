@@ -4,6 +4,11 @@ Notable changes to stats-lite. Versions match `Cargo.toml` and the app's Info.pl
 
 ## Unreleased
 
+## 0.2.1 — 2026-10-29
+
+- **An app icon.** A chip with its two numbers (teal CPU, amber disk) for Finder,
+  Spotlight and the disk image.
+
 ## 0.2.0 — 2026-10-29
 
 - **Check for Updates….** stats-lite checks `releases/latest.toml` at launch and

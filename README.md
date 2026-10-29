@@ -1,4 +1,8 @@
-# stats-lite
+<p align="center">
+  <img src="docs/icon.png" width="128" height="128" alt="stats-lite app icon">
+</p>
+
+<h1 align="center">stats-lite</h1>
 
 [![CI](https://github.com/timwuhaotian/stats-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/timwuhaotian/stats-lite/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

@@ -8,6 +8,8 @@
 	<string>stats-lite</string>
 	<key>CFBundleExecutable</key>
 	<string>stats-lite</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.statslite</string>
 	<key>CFBundlePackageType</key>
