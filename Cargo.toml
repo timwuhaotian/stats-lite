@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
+authors = ["timwuhaotian"]
+description = "CPU + disk % in the macOS menu bar. No settings, no charts."
+repository = "https://github.com/timwuhaotian/stats-lite"
+homepage = "https://github.com/timwuhaotian/stats-lite"
+readme = "README.md"
+keywords = ["macos", "menu-bar", "monitoring"]
+categories = ["os::macos-apis"]
 publish = false
 
 [[bin]]

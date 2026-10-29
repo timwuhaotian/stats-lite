@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # Pinned exactly on purpose: all pre-1.0, and the objc2 generation must stay the
+    # one kil uses (Cargo.toml). They are upgraded by hand, in step with kil.
+    ignore:
+      - dependency-name: sysinfo
+      - dependency-name: objc2
+      - dependency-name: objc2-foundation
+      - dependency-name: objc2-app-kit
+    groups:
+      cargo:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

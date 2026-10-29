@@ -3,15 +3,15 @@
 //! The title only changes when a number changes, so an idle machine costs no
 //! WindowServer redraws.
 
-use std::cell::RefCell;
-use std::time::Duration;
+use std::{cell::RefCell, time::Duration};
 
-use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{AnyThread, ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{
+    AnyThread, ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
+    runtime::AnyObject, sel,
+};
 use objc2_app_kit::{
-    NSApplication, NSAttributedStringAttachmentConveniences, NSFont, NSFontAttributeName,
-    NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusBarButton, NSTextAttachment,
+    NSApplication, NSAttributedStringAttachmentConveniences, NSFont, NSFontAttributeName, NSImage,
+    NSMenu, NSMenuItem, NSStatusBar, NSStatusBarButton, NSTextAttachment,
     NSVariableStatusItemLength,
 };
 use objc2_foundation::{
@@ -100,7 +100,9 @@ fn icon_run(icon: Option<&NSTextAttachment>, fallback: &str) -> Retained<NSAttri
 fn on_tick() {
     SAMPLER.with(|sampler| {
         let mut sampler = sampler.borrow_mut();
-        let Some(sampler) = sampler.as_mut() else { return };
+        let Some(sampler) = sampler.as_mut() else {
+            return;
+        };
         sampler.tick += 1;
         sampler.sys.refresh_cpu_usage();
         if sampler.tick % DISK_EVERY_TICKS == 0 {
@@ -171,7 +173,9 @@ define_class!(
 );
 
 fn main() {
-    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
 
     // CPU % is a delta between two samples: take the first one before the UI exists.
     let mut sys = System::new();
@@ -199,7 +203,9 @@ fn main() {
     menu.addItem(&quit);
     item.setMenu(Some(&menu));
 
-    let Some(button) = item.button(mtm) else { return };
+    let Some(button) = item.button(mtm) else {
+        return;
+    };
     // The status item retains its button, and neither is freed: see `on_tick`.
     let button_ptr = Retained::as_ptr(&button);
     std::mem::forget(button);

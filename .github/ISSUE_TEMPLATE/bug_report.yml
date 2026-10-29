@@ -1,0 +1,38 @@
+name: Bug report
+description: Something in stats-lite doesn't work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Screenshots help.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launch stats-lite
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: macOS 27.0
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: stats-lite build
+      description: The commit you built from (`git rev-parse --short HEAD`).
+  - type: textarea
+    id: menubar
+    attributes:
+      label: What the menu bar showed
+      description: The icons and numbers as seen, or nothing at all.
+      render: text
