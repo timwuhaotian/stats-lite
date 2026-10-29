@@ -1,0 +1,23 @@
+[package]
+name = "stats-lite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "stats-lite"
+path = "src/main.rs"
+
+[dependencies]
+# Exact pins: all pre-1.0. Same objc2 generation kil uses (verified combo).
+sysinfo = "=0.33.1"
+objc2 = "=0.6.5"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSAttributedString", "NSGeometry", "NSRange", "NSString", "NSTimer", "objc2-core-foundation"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSAttributedString", "NSButton", "NSControl", "NSFont", "NSFontDescriptor", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSTextAttachment", "NSView", "objc2-core-foundation"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
