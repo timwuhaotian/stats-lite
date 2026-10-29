@@ -4,9 +4,8 @@
 //! keeps the app from it until stats-lite quits. Quitting then replaces the running
 //! bundle, so the next launch is the new version.
 //!
-//! There is no window and no settings: progress shows in the update menu item's
-//! title, refreshed by the main-thread tick, and a manual check reports its outcome
-//! in an alert. Everything blocking runs on one background thread; only the
+//! A manual check shows its progress and outcome in `update_window`; automatic
+//! checks stay silent. Everything blocking runs on one background thread; only the
 //! system tools (`curl`, `codesign`, `spctl`, …) do the real work, so this file
 //! needs no new dependencies.
 
@@ -25,16 +24,19 @@ const MANIFEST_URL: &str =
 const DMG_URL: &str =
     "https://github.com/timwuhaotian/stats-lite/raw/main/releases/StatsLite-arm64.dmg";
 
-/// What a check is doing, for the menu item's title to show. `None` is idle.
+/// What a check is doing, for the menu item and update window to show.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
     Checking,
     /// The DMG's bytes so far, and its size once the server has said it.
     Downloading {
+        version: String,
         got: u64,
         total: Option<u64>,
     },
-    Verifying,
+    Verifying {
+        version: String,
+    },
 }
 
 /// The check under way, if any: written by its thread, read by the menu.
@@ -43,9 +45,10 @@ fn progress() -> &'static Mutex<Option<Step>> {
     PROGRESS.get_or_init(|| Mutex::new(None))
 }
 
-/// How a check ended, for a manual check's alert to report.
+/// How a check ended, for a manual check's update window to report.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
+    Ready(String),
     UpToDate,
     Failed(String),
 }
@@ -61,7 +64,7 @@ pub struct Ready {
 #[derive(Debug, Default)]
 struct State {
     outcome: Option<Outcome>,
-    /// A manual check is owed an alert for its outcome.
+    /// A manual check is owed its outcome in the update window.
     notify: bool,
     ready: Option<Ready>,
     /// Restart to Update: open the new app once this one has quit.
@@ -85,23 +88,23 @@ pub fn menu_status() -> (String, bool) {
     let title = match &*lock(progress()) {
         None => String::from("Check for Updates…"),
         Some(Step::Checking) => String::from("Checking for Updates…"),
-        Some(Step::Downloading { got, total }) => match total {
+        Some(Step::Downloading { got, total, .. }) => match total {
             Some(total) if *total > 0 => {
                 format!("Downloading {}%…", got.saturating_mul(100) / total)
             }
             _ => String::from("Downloading…"),
         },
-        Some(Step::Verifying) => String::from("Verifying Update…"),
+        Some(Step::Verifying { .. }) => String::from("Verifying Update…"),
     };
     (title, false)
 }
 
-/// Whether the item does anything right now: not while a check is under way.
-pub fn menu_enabled() -> bool {
-    lock(state()).ready.is_some() || lock(progress()).is_none()
+/// The current step, for an open update window to follow.
+pub fn current_step() -> Option<Step> {
+    lock(progress()).clone()
 }
 
-/// A finished manual check's outcome for the tick to alert, if one is owed.
+/// A finished manual check's outcome for the update window, if one is owed.
 pub fn take_notified_outcome() -> Option<Outcome> {
     let mut state = lock(state());
     if state.notify {
@@ -112,11 +115,19 @@ pub fn take_notified_outcome() -> Option<Outcome> {
     }
 }
 
-/// Check for Updates…: no-op while a check runs or one is already staged.
+/// Check for Updates…: a manual request also follows a check already under way.
 pub fn check_now(manual: bool) {
     {
         let mut state = lock(state());
-        if state.ready.is_some() || lock(progress()).is_some() {
+        if let Some(ready) = &state.ready {
+            if manual {
+                state.outcome = Some(Outcome::Ready(ready.version.clone()));
+                state.notify = true;
+            }
+            return;
+        }
+        if lock(progress()).is_some() {
+            state.notify |= manual;
             return;
         }
         state.outcome = None;
@@ -129,9 +140,8 @@ pub fn check_now(manual: bool) {
         let mut state = lock(state());
         match found {
             Ok(Some(ready)) => {
+                state.outcome = Some(Outcome::Ready(ready.version.clone()));
                 state.ready = Some(ready);
-                state.notify = false;
-                state.outcome = None;
             }
             Ok(None) => state.outcome = Some(Outcome::UpToDate),
             Err(err) => state.outcome = Some(Outcome::Failed(err)),
@@ -332,7 +342,7 @@ fn download(url: &str, to: &Path) -> Result<(), String> {
         .spawn()
         .map_err(|err| format!("{CURL}: {err}"))?;
     let report = || {
-        if let Some(Step::Downloading { got, total }) = lock(progress()).as_mut() {
+        if let Some(Step::Downloading { got, total, .. }) = lock(progress()).as_mut() {
             *got = fs::metadata(to).map_or(0, |file| file.len());
             *total = fs::read_to_string(&headers)
                 .ok()
@@ -444,7 +454,11 @@ fn fetch_manifest(url: &str) -> Result<Manifest, String> {
 /// If the download fails or any check does.
 fn stage(manifest: &Manifest, dmg_url: &str, dir: &Path, team: &str) -> Result<PathBuf, String> {
     let version = &manifest.version;
-    let verifying = || *lock(progress()) = Some(Step::Verifying);
+    let verifying = || {
+        *lock(progress()) = Some(Step::Verifying {
+            version: version.clone(),
+        })
+    };
     let app = dir.join("StatsLite.app");
     if app.exists() {
         verifying();
@@ -456,6 +470,7 @@ fn stage(manifest: &Manifest, dmg_url: &str, dir: &Path, team: &str) -> Result<P
     fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     let dmg = dir.join("StatsLite.dmg");
     *lock(progress()) = Some(Step::Downloading {
+        version: version.clone(),
         got: 0,
         total: None,
     });

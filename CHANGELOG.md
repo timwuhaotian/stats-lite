@@ -4,6 +4,12 @@ Notable changes to stats-lite. Versions match `Cargo.toml` and the app's Info.pl
 
 ## Unreleased
 
+## 0.2.2 — 2026-10-29
+
+- **Update feedback.** **Check for Updates…** opens a small window that follows
+  checking, downloading and verification, then reports the result or offers
+  **Restart Now**. Automatic checks stay silent.
+
 ## 0.2.1 — 2026-10-29
 
 - **An app icon.** A chip with its two numbers (teal CPU, amber disk) for Finder,

@@ -50,7 +50,9 @@ ditto target/release/StatsLite.app /Applications/StatsLite.app
 - The menu-bar title reads e.g. `[cpu] 12%  [drive] 34%`: CPU usage and used %
   of the `/` volume. A volume that can't be read shows `—`, never `0%`.
 - Hovering (or VoiceOver) gives the words: `stats-lite: CPU 12%, disk 34%`.
-- The only menu item is **Quit stats-lite** (`⌘Q`).
+- **Check for Updates…** opens a window with live progress and the result; a
+  downloaded update can be installed with **Restart Now**. **Quit stats-lite** (`⌘Q`)
+  also installs an update that is ready.
 
 ## How it works
 

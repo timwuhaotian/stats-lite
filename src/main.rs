@@ -6,6 +6,7 @@
 use std::{cell::RefCell, time::Duration};
 
 mod update;
+mod update_window;
 
 use objc2::{
     AnyThread, ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
@@ -115,7 +116,7 @@ fn on_tick() {
         let Some(sampler) = sampler.as_mut() else {
             return;
         };
-        // Menu actions and alerts below all run here, on the main thread.
+        // Menu and update-window actions below all run here, on the main thread.
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -168,21 +169,9 @@ fn on_tick() {
             let _: () = unsafe { msg_send![button, setToolTip: &*tip] };
         }
         refresh_update_item(sampler);
+        update_window::refresh(mtm);
         if sampler.tick == FIRST_CHECK_TICK || sampler.tick % CHECK_EVERY_TICKS == 0 {
             update::check_now(false);
-        }
-        match update::take_notified_outcome() {
-            Some(update::Outcome::UpToDate) => {
-                show_alert(
-                    mtm,
-                    "You're Up to Date",
-                    "stats-lite is the latest version.",
-                );
-            }
-            Some(update::Outcome::Failed(err)) => {
-                show_alert(mtm, "Couldn't Check for Updates", &err);
-            }
-            None => {}
         }
     });
 }
@@ -198,7 +187,6 @@ fn refresh_update_item(sampler: &mut Sampler) {
     // SAFETY: set at startup from the item the menu retains, never nulled afterwards.
     let item = unsafe { &*sampler.update_item };
     item.setTitle(&NSString::from_str(&title));
-    item.setEnabled(update::menu_enabled());
     // SAFETY: `setAction:` takes a SEL; both are implemented by `Ticker`, the target.
     let _: () = unsafe {
         msg_send![item, setAction: if is_restart { sel!(restartToUpdate:) } else { sel!(checkForUpdates:) }]
@@ -244,6 +232,18 @@ define_class!(
         #[unsafe(method(checkForUpdates:))]
         fn check_for_updates(&self, _sender: &AnyObject) {
             update::check_now(true);
+            if let Some(mtm) = MainThreadMarker::new() {
+                // SAFETY: the ticker is deliberately kept alive for the process, and
+                // implements the two selectors used by the update window's buttons.
+                unsafe {
+                    update_window::show(mtm, self as *const Self as *const AnyObject);
+                }
+            }
+        }
+
+        #[unsafe(method(dismissUpdate:))]
+        fn dismiss_update(&self, _sender: &AnyObject) {
+            update_window::dismiss();
         }
 
         #[unsafe(method(restartToUpdate:))]
