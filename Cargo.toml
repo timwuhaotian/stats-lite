@@ -20,6 +20,7 @@ path = "src/main.rs"
 [dependencies]
 # Exact pins: all pre-1.0. Same objc2 generation kil uses (verified combo).
 sysinfo = "=0.33.1"
+libc = "=0.2.191"
 objc2 = "=0.6.5"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSAttributedString", "NSGeometry", "NSRange", "NSString", "NSTimer", "objc2-core-foundation"] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSAttributedString", "NSButton", "NSControl", "NSFont", "NSFontDescriptor", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSTextAttachment", "NSView", "NSColor", "NSGraphics", "NSProgressIndicator", "NSTextField", "NSWindow", "objc2-core-foundation"] }

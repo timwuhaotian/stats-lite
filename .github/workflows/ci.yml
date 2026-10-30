@@ -17,8 +17,12 @@ env:
 
 jobs:
   check:
-    # Apple silicon, like every stats-lite build.
-    runs-on: macos-15
+    # Apple silicon, like every stats-lite build; oldest and newest macOS so
+    # version-gated behaviour (e.g. the split Data volume) is covered.
+    strategy:
+      matrix:
+        macos: [macos-15, macos-26]
+    runs-on: ${{ matrix.macos }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7

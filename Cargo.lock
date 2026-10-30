@@ -167,6 +167,7 @@ dependencies = [
 name = "stats-lite"
 version = "0.2.2"
 dependencies = [
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

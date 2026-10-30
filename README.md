@@ -10,7 +10,8 @@
 
 CPU and disk usage in the macOS menu bar, and nothing else. No settings, no charts,
 no dock icon: a `cpu` icon with the CPU %, an `internaldrive` icon with the used %
-of the `/` volume. Numbers are monospaced and right-aligned, so neighbouring icons
+of the boot volume. Purgeable space counts as used, so the number agrees with
+`df` and Storage settings. Numbers are monospaced and right-aligned, so neighbouring icons
 never bounce as values change.
 
 An idle machine costs nothing: CPU is sampled every 2 s (disk every 60 s), and the
@@ -48,7 +49,8 @@ ditto target/release/StatsLite.app /Applications/StatsLite.app
 ## Using it
 
 - The menu-bar title reads e.g. `[cpu] 12%  [drive] 34%`: CPU usage and used %
-  of the `/` volume. A volume that can't be read shows `—`, never `0%`.
+  of the boot volume (`/System/Volumes/Data` where it exists, `/` elsewhere).
+  A volume that can't be read shows `—`, never `0%`.
 - Hovering (or VoiceOver) gives the words: `stats-lite: CPU 12%, disk 34%`.
 - **Check for Updates…** opens a window with live progress and the result; a
   downloaded update can be installed with **Restart Now**. **Quit stats-lite** (`⌘Q`)
@@ -56,8 +58,10 @@ ditto target/release/StatsLite.app /Applications/StatsLite.app
 
 ## How it works
 
-- [`sysinfo`](https://github.com/GuillaumeGomez/sysinfo) samples CPU (2 s cadence)
-  and disk (every 60 s). CPU % is a delta between two samples, so one is taken
+- [`sysinfo`](https://github.com/GuillaumeGomez/sysinfo) samples CPU (2 s cadence).
+  Disk is one `statfs` call every 60 s on the Data volume, falling back to `/`;
+  its available bytes exclude purgeable space, unlike sysinfo's disk figures.
+  CPU % is a delta between two samples, so one is taken
   before the UI even exists.
 - [`objc2`](https://github.com/madsmtm/objc2) owns a variable-length `NSStatusItem`;
   the title is an attributed string with SF Symbol attachments, rebuilt only when
