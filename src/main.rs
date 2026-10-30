@@ -21,12 +21,12 @@ use objc2_foundation::{
     NSAttributedString, NSMutableAttributedString, NSObject, NSObjectProtocol, NSPoint, NSRange,
     NSRect, NSSize, NSString, NSTimer,
 };
-use sysinfo::{Disks, System};
+use sysinfo::System;
 
 /// CPU re-sampled this often. 1s polling is what made Stats burn 59% CPU to
 /// watch an idle machine; 2s still feels live.
 const CPU_INTERVAL: f64 = 2.0;
-/// Disk space moves by the minute at most: re-list it every 30 ticks (60s).
+/// Disk space moves by the minute at most: re-read it every 30 ticks (60s).
 const DISK_EVERY_TICKS: u64 = 30;
 /// Digit size: the menu bar's own title size.
 const FONT_SIZE: f64 = 13.0;
@@ -43,7 +43,8 @@ const CHECK_EVERY_TICKS: u64 = 10_800;
 
 struct Sampler {
     sys: System,
-    disks: Disks,
+    /// Last disk reading; refreshed every [`DISK_EVERY_TICKS`] ticks.
+    disk: Option<u64>,
     /// The button, `mem::forget`-ed at startup: alive for the whole process.
     button: *const NSStatusBarButton,
     /// `cpu|disk` of the last paint; the attributed title is only rebuilt on change.
@@ -62,17 +63,42 @@ thread_local! {
     static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
 }
 
-/// Used % of the `/` volume. `None` when it can't be found or reports 0 total.
-fn disk_used_percent(disks: &Disks) -> Option<u64> {
-    let root = disks
-        .list()
+/// Mounts probed in order: the writable Data volume first (the macOS 10.15+
+/// split layout), then `/` (older single-volume layouts and anything else).
+/// Both report the same container on 10.15+, so the order only matters where
+/// the Data volume does not exist.
+const DISK_MOUNTS: [&str; 2] = ["/System/Volumes/Data", "/"];
+
+/// Used % of the boot volume, purgeable space excluded. `statfs` reports the
+/// same available bytes as `df` and Storage settings on every macOS release,
+/// while sysinfo's `available_space` counts purgeable space as free (about 10
+/// points lower here). `None` when no mount can be read or reports 0 blocks.
+fn disk_used_percent() -> Option<u64> {
+    DISK_MOUNTS
         .iter()
-        .find(|disk| disk.mount_point() == std::path::Path::new("/"))?;
-    let total = root.total_space();
+        .find_map(|mount| statfs_used_percent(mount))
+}
+
+fn statfs_used_percent(mount: &str) -> Option<u64> {
+    let path = std::ffi::CString::new(mount).ok()?;
+    // SAFETY: `path` is NUL-terminated, `fs` is a valid out-pointer, and
+    // `statfs` has no version-gated behaviour on macOS.
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(path.as_ptr(), &mut fs) } != 0 {
+        return None;
+    }
+    used_percent(fs.f_blocks as u64, fs.f_bavail as u64, fs.f_bsize as u64)
+}
+
+/// Share of blocks in use, `None` on a 0-sized volume. Saturating: layouts
+/// that report more available than total read as 0%, never wrap around.
+fn used_percent(blocks: u64, bavail: u64, bsize: u64) -> Option<u64> {
+    let total = blocks.checked_mul(bsize)?;
     if total == 0 {
         return None;
     }
-    Some((total - root.available_space()) * 100 / total)
+    let avail = bavail.checked_mul(bsize)?;
+    Some(total.saturating_sub(avail) * 100 / total)
 }
 
 /// An SF Symbol as a menu-bar template icon, scaled to [`ICON_HEIGHT`]. `None`
@@ -123,10 +149,10 @@ fn on_tick() {
         sampler.tick += 1;
         sampler.sys.refresh_cpu_usage();
         if sampler.tick % DISK_EVERY_TICKS == 0 {
-            sampler.disks = Disks::new_with_refreshed_list();
+            sampler.disk = disk_used_percent();
         }
         let cpu = sampler.sys.global_cpu_usage().round() as u64;
-        let disk = disk_used_percent(&sampler.disks);
+        let disk = sampler.disk;
         // Cache key: rebuilding the attributed title a tick is a WindowServer
         // redraw a tick; skip the identical ones.
         let key = match disk {
@@ -321,7 +347,7 @@ fn main() {
     SAMPLER.with(|sampler| {
         *sampler.borrow_mut() = Some(Sampler {
             sys,
-            disks: Disks::new_with_refreshed_list(),
+            disk: disk_used_percent(),
             button: button_ptr,
             last_title: String::new(),
             tick: 0,
@@ -350,4 +376,38 @@ fn main() {
         ]
     };
     app.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn used_percent_matches_df() {
+        // This machine: statfs/df report 235_016_896_512 available of
+        // 494_384_795_648 total, i.e. 52% used.
+        assert_eq!(used_percent(494_384_795_648, 235_016_896_512, 1), Some(52));
+    }
+
+    #[test]
+    fn used_percent_ignores_nothing_but_blocks() {
+        assert_eq!(used_percent(100, 48, 4096), Some(52));
+        assert_eq!(used_percent(100, 100, 4096), Some(0));
+        // More available than total saturates to 0% instead of wrapping.
+        assert_eq!(used_percent(100, 200, 4096), Some(0));
+    }
+
+    #[test]
+    fn used_percent_rejects_empty_volumes() {
+        assert_eq!(used_percent(0, 0, 4096), None);
+        assert_eq!(used_percent(100, 50, 0), None);
+    }
+
+    #[test]
+    fn important_usage_capacity_would_read_low() {
+        // sysinfo's `available_space` counts purgeable space as free
+        // (294_976_599_106 here), which is how the menu bar showed 40%
+        // while `df` showed ~50%. Pin the gap so it can't regress silently.
+        assert_eq!(used_percent(494_384_795_648, 294_976_599_106, 1), Some(40));
+    }
 }

@@ -4,6 +4,11 @@ Notable changes to stats-lite. Versions match `Cargo.toml` and the app's Info.pl
 
 ## Unreleased
 
+- **Disk % now agrees with `df` and Storage settings.** It reads the Data
+  volume (`/System/Volumes/Data`, falling back to `/` on layouts without
+  one) with `statfs`, so purgeable space no longer counts as free — the
+  number that showed ~40% now shows the ~50% the system reports.
+
 ## 0.2.2 — 2026-10-29
 
 - **Update feedback.** **Check for Updates…** opens a small window that follows
