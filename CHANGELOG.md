@@ -4,6 +4,15 @@ Notable changes to stats-lite. Versions match `Cargo.toml` and the app's Info.pl
 
 ## Unreleased
 
+## 0.2.4 — 2026-11-01
+
+- **Disk % no longer looks stuck.** It now shows one decimal (e.g. `48.7%`):
+  at whole-percent precision 1% of a ~500 GB disk is ~5 GB, so the number
+  could sit unchanged for days while the disk filled underneath it. The
+  reading itself was live — one `statfs` call, now every 30 s, of the
+  whole APFS container; that is also why it differs from `df`'s Capacity
+  column, which counts only the Data volume's own files.
+
 ## 0.2.3 — 2026-11-01
 
 - **Disk % now agrees with `df` and Storage settings.** It reads the Data

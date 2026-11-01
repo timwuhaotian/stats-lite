@@ -26,8 +26,9 @@ use sysinfo::System;
 /// CPU re-sampled this often. 1s polling is what made Stats burn 59% CPU to
 /// watch an idle machine; 2s still feels live.
 const CPU_INTERVAL: f64 = 2.0;
-/// Disk space moves by the minute at most: re-read it every 30 ticks (60s).
-const DISK_EVERY_TICKS: u64 = 30;
+/// Disk is one `statfs` call, cheap enough every 15 ticks (30s): at 0.1%
+/// precision a fast download can cross a step in well under a minute.
+const DISK_EVERY_TICKS: u64 = 15;
 /// Digit size: the menu bar's own title size.
 const FONT_SIZE: f64 = 13.0;
 /// Icon height in points: the digits' cap height, so icon and number read as one.
@@ -43,7 +44,8 @@ const CHECK_EVERY_TICKS: u64 = 10_800;
 
 struct Sampler {
     sys: System,
-    /// Last disk reading; refreshed every [`DISK_EVERY_TICKS`] ticks.
+    /// Last disk reading, in tenths of a percent; refreshed every
+    /// [`DISK_EVERY_TICKS`] ticks.
     disk: Option<u64>,
     /// The button, `mem::forget`-ed at startup: alive for the whole process.
     button: *const NSStatusBarButton,
@@ -69,17 +71,22 @@ thread_local! {
 /// the Data volume does not exist.
 const DISK_MOUNTS: [&str; 2] = ["/System/Volumes/Data", "/"];
 
-/// Used % of the boot volume, purgeable space excluded. `statfs` reports the
-/// same available bytes as `df` and Storage settings on every macOS release,
-/// while sysinfo's `available_space` counts purgeable space as free (about 10
-/// points lower here). `None` when no mount can be read or reports 0 blocks.
-fn disk_used_percent() -> Option<u64> {
+/// Used share of the boot volume's APFS container, in tenths of a percent,
+/// purgeable space excluded. `statfs` reports the same available bytes as
+/// `df`'s Avail column on every macOS release, while sysinfo's
+/// `available_space` counts purgeable space as free (about 10 points lower
+/// here). This is the container's share, so it differs from `df`'s Capacity
+/// column, which only counts the Data volume's own files against itself.
+/// Tenths, not whole percent: 1% of a 500 GB disk is ~5 GB, so an integer
+/// display can sit unchanged for days and read as stuck. `None` when no
+/// mount can be read or reports 0 blocks.
+fn disk_used_tenths() -> Option<u64> {
     DISK_MOUNTS
         .iter()
-        .find_map(|mount| statfs_used_percent(mount))
+        .find_map(|mount| statfs_used_tenths(mount))
 }
 
-fn statfs_used_percent(mount: &str) -> Option<u64> {
+fn statfs_used_tenths(mount: &str) -> Option<u64> {
     let path = std::ffi::CString::new(mount).ok()?;
     // SAFETY: `path` is NUL-terminated, `fs` is a valid out-pointer, and
     // `statfs` has no version-gated behaviour on macOS.
@@ -87,18 +94,26 @@ fn statfs_used_percent(mount: &str) -> Option<u64> {
     if unsafe { libc::statfs(path.as_ptr(), &mut fs) } != 0 {
         return None;
     }
-    used_percent(fs.f_blocks as u64, fs.f_bavail as u64, fs.f_bsize as u64)
+    used_tenths(fs.f_blocks as u64, fs.f_bavail as u64, fs.f_bsize as u64)
 }
 
-/// Share of blocks in use, `None` on a 0-sized volume. Saturating: layouts
-/// that report more available than total read as 0%, never wrap around.
-fn used_percent(blocks: u64, bavail: u64, bsize: u64) -> Option<u64> {
+/// Share of blocks in use in tenths of a percent, rounded to the nearest
+/// tenth, `None` on a 0-sized volume. Saturating: layouts that report more
+/// available than total read as 0%, never wrap around.
+fn used_tenths(blocks: u64, bavail: u64, bsize: u64) -> Option<u64> {
     let total = blocks.checked_mul(bsize)?;
     if total == 0 {
         return None;
     }
     let avail = bavail.checked_mul(bsize)?;
-    Some(total.saturating_sub(avail) * 100 / total)
+    let used = u128::from(total.saturating_sub(avail));
+    let total = u128::from(total);
+    Some(((used * 1000 + total / 2) / total) as u64)
+}
+
+/// Tenths of a percent as `48.7`; the caller pads it to a fixed width.
+fn format_disk(tenths: u64) -> String {
+    format!("{}.{}", tenths / 10, tenths % 10)
 }
 
 /// An SF Symbol as a menu-bar template icon, scaled to [`ICON_HEIGHT`]. `None`
@@ -149,7 +164,7 @@ fn on_tick() {
         sampler.tick += 1;
         sampler.sys.refresh_cpu_usage();
         if sampler.tick % DISK_EVERY_TICKS == 0 {
-            sampler.disk = disk_used_percent();
+            sampler.disk = disk_used_tenths();
         }
         let cpu = sampler.sys.global_cpu_usage().round() as u64;
         let disk = sampler.disk;
@@ -169,7 +184,9 @@ fn on_tick() {
             title.appendAttributedString(&text_run(&format!(" {cpu:>3}%  ")));
             title.appendAttributedString(&icon_run(sampler.disk_icon.as_deref(), "D"));
             let disk_text = match disk {
-                Some(disk) => format!(" {disk:>3}%"),
+                // Padded to the width of `100.0`, so the value never bounces
+                // the neighbouring menu-bar icons around either.
+                Some(disk) => format!(" {:>5}%", format_disk(disk)),
                 // Em dash, never 0%: a missing volume must not read as empty.
                 None => String::from(" \u{2014}"),
             };
@@ -188,7 +205,7 @@ fn on_tick() {
             button.setAttributedTitle(&title);
             // Labels are icons now, so the tooltip (and VoiceOver) carries the words.
             let tip = match disk {
-                Some(disk) => format!("stats-lite: CPU {cpu}%, disk {disk}%"),
+                Some(disk) => format!("stats-lite: CPU {cpu}%, disk {}%", format_disk(disk)),
                 None => format!("stats-lite: CPU {cpu}%, disk unreadable"),
             };
             let tip = NSString::from_str(&tip);
@@ -347,7 +364,7 @@ fn main() {
     SAMPLER.with(|sampler| {
         *sampler.borrow_mut() = Some(Sampler {
             sys,
-            disk: disk_used_percent(),
+            disk: disk_used_tenths(),
             button: button_ptr,
             last_title: String::new(),
             tick: 0,
@@ -383,31 +400,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn used_percent_matches_df() {
-        // This machine: statfs/df report 235_016_896_512 available of
-        // 494_384_795_648 total, i.e. 52% used.
-        assert_eq!(used_percent(494_384_795_648, 235_016_896_512, 1), Some(52));
+    fn used_tenths_matches_statfs_snapshot() {
+        // A statfs snapshot of this machine: 235_016_896_512 available of
+        // 494_384_795_648 total, i.e. 52.5% used.
+        assert_eq!(used_tenths(494_384_795_648, 235_016_896_512, 1), Some(525));
     }
 
     #[test]
-    fn used_percent_ignores_nothing_but_blocks() {
-        assert_eq!(used_percent(100, 48, 4096), Some(52));
-        assert_eq!(used_percent(100, 100, 4096), Some(0));
+    fn used_tenths_ignores_nothing_but_blocks() {
+        assert_eq!(used_tenths(100, 48, 4096), Some(520));
+        assert_eq!(used_tenths(100, 100, 4096), Some(0));
         // More available than total saturates to 0% instead of wrapping.
-        assert_eq!(used_percent(100, 200, 4096), Some(0));
+        assert_eq!(used_tenths(100, 200, 4096), Some(0));
     }
 
     #[test]
-    fn used_percent_rejects_empty_volumes() {
-        assert_eq!(used_percent(0, 0, 4096), None);
-        assert_eq!(used_percent(100, 50, 0), None);
+    fn used_tenths_moves_below_one_percent() {
+        // 0.1% steps: a sub-1% change must move the reading, or the menu
+        // bar looks stuck for as long as <1% of the disk takes to fill.
+        assert_eq!(used_tenths(10_000, 5_140, 1), Some(486));
+        assert_eq!(used_tenths(10_000, 5_130, 1), Some(487));
+    }
+
+    #[test]
+    fn used_tenths_rejects_empty_volumes() {
+        assert_eq!(used_tenths(0, 0, 4096), None);
+        assert_eq!(used_tenths(100, 50, 0), None);
+    }
+
+    #[test]
+    fn format_disk_is_one_decimal() {
+        assert_eq!(format_disk(487), "48.7");
+        assert_eq!(format_disk(52), "5.2");
+        assert_eq!(format_disk(1000), "100.0");
     }
 
     #[test]
     fn important_usage_capacity_would_read_low() {
         // sysinfo's `available_space` counts purgeable space as free
         // (294_976_599_106 here), which is how the menu bar showed 40%
-        // while `df` showed ~50%. Pin the gap so it can't regress silently.
-        assert_eq!(used_percent(494_384_795_648, 294_976_599_106, 1), Some(40));
+        // while the container reported ~50%. Pin the gap so it can't
+        // regress silently.
+        assert_eq!(used_tenths(494_384_795_648, 294_976_599_106, 1), Some(403));
     }
 }

@@ -10,11 +10,14 @@
 
 CPU and disk usage in the macOS menu bar, and nothing else. No settings, no charts,
 no dock icon: a `cpu` icon with the CPU %, an `internaldrive` icon with the used %
-of the boot volume. Purgeable space counts as used, so the number agrees with
-`df` and Storage settings. Numbers are monospaced and right-aligned, so neighbouring icons
-never bounce as values change.
+of the boot volume. Purgeable space counts as used; the number is the APFS
+container's used share (its available bytes are `df`'s Avail column, while
+`df`'s Capacity only counts the Data volume's own files). Disk shows one
+decimal: 1% of a disk is gigabytes, so a whole-percent number can sit
+unchanged for days. Numbers are monospaced and right-aligned, so neighbouring
+icons never bounce as values change.
 
-An idle machine costs nothing: CPU is sampled every 2 s (disk every 60 s), and the
+An idle machine costs nothing: CPU is sampled every 2 s (disk every 30 s), and the
 title is only rewritten when a number changes, so there are no WindowServer redraws
 at rest. (1 s polling is what made Stats burn 59% CPU watching an idle machine.)
 
@@ -48,10 +51,10 @@ ditto target/release/StatsLite.app /Applications/StatsLite.app
 
 ## Using it
 
-- The menu-bar title reads e.g. `[cpu] 12%  [drive] 34%`: CPU usage and used %
+- The menu-bar title reads e.g. `[cpu] 12%  [drive] 34.2%`: CPU usage and used %
   of the boot volume (`/System/Volumes/Data` where it exists, `/` elsewhere).
   A volume that can't be read shows `—`, never `0%`.
-- Hovering (or VoiceOver) gives the words: `stats-lite: CPU 12%, disk 34%`.
+- Hovering (or VoiceOver) gives the words: `stats-lite: CPU 12%, disk 34.2%`.
 - **Check for Updates…** opens a window with live progress and the result; a
   downloaded update can be installed with **Restart Now**. **Quit stats-lite** (`⌘Q`)
   also installs an update that is ready.
@@ -59,7 +62,7 @@ ditto target/release/StatsLite.app /Applications/StatsLite.app
 ## How it works
 
 - [`sysinfo`](https://github.com/GuillaumeGomez/sysinfo) samples CPU (2 s cadence).
-  Disk is one `statfs` call every 60 s on the Data volume, falling back to `/`;
+  Disk is one `statfs` call every 30 s on the Data volume, falling back to `/`;
   its available bytes exclude purgeable space, unlike sysinfo's disk figures.
   CPU % is a delta between two samples, so one is taken
   before the UI even exists.
