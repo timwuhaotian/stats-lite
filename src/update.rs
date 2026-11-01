@@ -12,10 +12,11 @@
 use std::{
     ffi::OsStr,
     fs,
-    io::Read as _,
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 /// Raw from `main`, where the release commit puts the DMG and this file together.
@@ -23,6 +24,14 @@ const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/timwuhaotian/stats-lite/main/releases/latest.toml";
 const DMG_URL: &str =
     "https://github.com/timwuhaotian/stats-lite/raw/main/releases/StatsLite-arm64.dmg";
+
+/// No step may wait on a system tool forever: a hung one fails the check instead.
+const SHORT_TIMEOUT: Duration = Duration::from_secs(15);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(120);
+const MANIFEST_TIMEOUT: Duration = Duration::from_secs(40);
+/// Past curl's own `--max-time`, in case curl itself is the thing that hung.
+const DOWNLOAD_DEADLINE: Duration = Duration::from_secs(330);
 
 /// What a check is doing, for the menu item and update window to show.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,9 +114,11 @@ pub fn current_step() -> Option<Step> {
 }
 
 /// A finished manual check's outcome for the update window, if one is owed.
+/// `notify` is only spent once an outcome exists: a tick landing between the
+/// check thread publishing and it finishing must not eat the notification.
 pub fn take_notified_outcome() -> Option<Outcome> {
     let mut state = lock(state());
-    if state.notify {
+    if state.notify && state.outcome.is_some() {
         state.notify = false;
         state.outcome.take()
     } else {
@@ -135,17 +146,28 @@ pub fn check_now(manual: bool) {
         *lock(progress()) = Some(Step::Checking);
     }
     std::thread::spawn(|| {
-        let found = find(env!("CARGO_PKG_VERSION"));
-        *lock(progress()) = None;
-        let mut state = lock(state());
-        match found {
-            Ok(Some(ready)) => {
-                state.outcome = Some(Outcome::Ready(ready.version.clone()));
-                state.ready = Some(ready);
+        // Publish the outcome before clearing progress, and even on a panic:
+        // a check that leaves `progress` set blocks every later check forever.
+        let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            find(env!("CARGO_PKG_VERSION"))
+        }));
+        {
+            let mut state = lock(state());
+            match found {
+                Ok(Ok(Some(ready))) => {
+                    state.outcome = Some(Outcome::Ready(ready.version.clone()));
+                    state.ready = Some(ready);
+                }
+                Ok(Ok(None)) => state.outcome = Some(Outcome::UpToDate),
+                Ok(Err(err)) => state.outcome = Some(Outcome::Failed(err)),
+                Err(_) => {
+                    state.outcome = Some(Outcome::Failed(
+                        "the update check stopped unexpectedly".to_owned(),
+                    ));
+                }
             }
-            Ok(None) => state.outcome = Some(Outcome::UpToDate),
-            Err(err) => state.outcome = Some(Outcome::Failed(err)),
         }
+        *lock(progress()) = None;
     });
 }
 
@@ -288,13 +310,61 @@ fn replaceable_bundle(exe: &Path) -> Result<PathBuf, &'static str> {
     Ok(bundle.to_owned())
 }
 
-/// Runs `program`; a failure is its stderr, else how it ended.
-fn run(program: &str, args: &[&OsStr]) -> Result<String, String> {
-    let output = Command::new(program)
+fn drain<R: Read + Send + 'static>(mut pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
+/// Runs `program` to completion, killing it after `timeout`; output is drained
+/// on reader threads so a chatty child can't fill a pipe and deadlock the wait.
+fn run_with_timeout(
+    program: &str,
+    args: &[&OsStr],
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|err| format!("{program}: {err}"))?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let name = Path::new(program).file_name().unwrap_or_default().display();
+                return Err(format!(
+                    "{name}: timed out after {}s",
+                    timeout.as_secs().max(1)
+                ));
+            }
+            Err(err) => return Err(format!("{program}: {err}")),
+        }
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+/// Runs `program`; a failure is its stderr, else how it ended.
+fn run(program: &str, args: &[&OsStr], timeout: Duration) -> Result<String, String> {
+    let output = run_with_timeout(program, args, timeout)?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
     }
@@ -330,15 +400,31 @@ fn content_length(headers: &str) -> Option<u64> {
 fn download(url: &str, to: &Path) -> Result<(), String> {
     const CURL: &str = "/usr/bin/curl";
     let headers = to.with_extension("headers");
+    // stderr goes to a file, not a pipe nobody drains while polling: a full
+    // pipe would block curl mid-write and the poll below would never see it exit.
+    let errors = to.with_extension("errors");
+    let error_file =
+        fs::File::create(&errors).map_err(|err| format!("{}: {err}", errors.display()))?;
     let mut curl = Command::new(CURL)
-        .args(["-fsSL", "--max-time", "900", "-D"])
+        .args([
+            "-fsSL",
+            "--connect-timeout",
+            "15",
+            "--speed-limit",
+            "1024",
+            "--speed-time",
+            "30",
+            "--max-time",
+            "300",
+            "-D",
+        ])
         .arg(&headers)
         .arg("-o")
         .arg(to)
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(error_file)
         .spawn()
         .map_err(|err| format!("{CURL}: {err}"))?;
     let report = || {
@@ -349,33 +435,42 @@ fn download(url: &str, to: &Path) -> Result<(), String> {
                 .and_then(|headers| content_length(&headers));
         }
     };
+    let started = Instant::now();
     let status = loop {
         report();
         match curl.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(super::UPDATE_POLL),
+            Ok(None) if started.elapsed() < DOWNLOAD_DEADLINE => {
+                std::thread::sleep(super::UPDATE_POLL);
+            }
+            Ok(None) => {
+                let _ = curl.kill();
+                let _ = curl.wait();
+                let _ = fs::remove_file(&headers);
+                let _ = fs::remove_file(&errors);
+                return Err(format!("{CURL}: timed out"));
+            }
             Err(err) => return Err(format!("{CURL}: {err}")),
         }
     };
     report();
+    let stderr = fs::read(&errors).unwrap_or_default();
     let _ = fs::remove_file(&headers);
+    let _ = fs::remove_file(&errors);
     if status.success() {
         return Ok(());
-    }
-    let mut stderr = Vec::new();
-    if let Some(mut pipe) = curl.stderr.take() {
-        let _ = pipe.read_to_end(&mut stderr);
     }
     Err(failure(CURL, status, &stderr))
 }
 
 /// The Developer ID team that signed `app`; `None` for an ad-hoc signature (a local build).
 fn team_of(app: &Path) -> Option<String> {
-    let output = Command::new("/usr/bin/codesign")
-        .args(["-dv", "--verbose=2"])
-        .arg(app)
-        .output()
-        .ok()?;
+    let output = run_with_timeout(
+        "/usr/bin/codesign",
+        &["-dv".as_ref(), "--verbose=2".as_ref(), app.as_os_str()],
+        SHORT_TIMEOUT,
+    )
+    .ok()?;
     String::from_utf8_lossy(&output.stderr)
         .lines()
         .find_map(|line| line.strip_prefix("TeamIdentifier="))
@@ -393,6 +488,7 @@ fn bundle_version(app: &Path) -> Result<String, String> {
             "Print :CFBundleShortVersionString".as_ref(),
             plist.as_os_str(),
         ],
+        SHORT_TIMEOUT,
     )
 }
 
@@ -414,6 +510,7 @@ fn verify(app: &Path, version: &str, team: &str) -> Result<(), String> {
             requirement.as_ref(),
             app.as_os_str(),
         ],
+        VERIFY_TIMEOUT,
     )
     .map_err(|err| format!("the download isn't signed as stats-lite is ({err})"))?;
     run(
@@ -424,6 +521,7 @@ fn verify(app: &Path, version: &str, team: &str) -> Result<(), String> {
             "execute".as_ref(),
             app.as_os_str(),
         ],
+        VERIFY_TIMEOUT,
     )
     .map_err(|err| format!("Apple hasn't notarized the download ({err})"))?;
     Ok(())
@@ -442,6 +540,7 @@ fn fetch_manifest(url: &str) -> Result<Manifest, String> {
             "30".as_ref(),
             url.as_ref(),
         ],
+        MANIFEST_TIMEOUT,
     )?;
     Manifest::parse(&text)
 }
@@ -479,6 +578,7 @@ fn stage(manifest: &Manifest, dmg_url: &str, dir: &Path, team: &str) -> Result<P
     let sum = run(
         "/usr/bin/shasum",
         &["-a".as_ref(), "256".as_ref(), dmg.as_os_str()],
+        SHORT_TIMEOUT,
     )?;
     if !sum
         .split_whitespace()
@@ -500,17 +600,19 @@ fn stage(manifest: &Manifest, dmg_url: &str, dir: &Path, team: &str) -> Result<P
             mount.as_os_str(),
             dmg.as_os_str(),
         ],
+        COMMAND_TIMEOUT,
     )?;
     let copied = run(
         "/usr/bin/ditto",
         &[mount.join("StatsLite.app").as_os_str(), app.as_os_str()],
+        COMMAND_TIMEOUT,
     );
     let detach = |force: bool| {
         let mut args = vec!["detach".as_ref(), "-quiet".as_ref(), mount.as_os_str()];
         if force {
             args.push("-force".as_ref());
         }
-        run("/usr/bin/hdiutil", &args)
+        run("/usr/bin/hdiutil", &args, COMMAND_TIMEOUT)
     };
     if detach(false).is_err() {
         let _ = detach(true);
@@ -539,7 +641,11 @@ fn install(staged: &Path, bundle: &Path) -> Result<(), String> {
     for leftover in [&new, &old] {
         let _ = fs::remove_dir_all(leftover);
     }
-    run("/usr/bin/ditto", &[staged.as_os_str(), new.as_os_str()])?;
+    run(
+        "/usr/bin/ditto",
+        &[staged.as_os_str(), new.as_os_str()],
+        COMMAND_TIMEOUT,
+    )?;
     if let Err(err) = fs::rename(bundle, &old) {
         let _ = fs::remove_dir_all(&new);
         return Err(format!("{}: {err}", bundle.display()));
@@ -611,6 +717,27 @@ mod tests {
             ],
             [true, true, false, false, false, false]
         );
+    }
+
+    #[test]
+    fn notified_outcome_should_only_be_spent_once_published() {
+        {
+            let mut state = lock(state());
+            state.notify = true;
+            state.outcome = None;
+        }
+        assert_eq!(take_notified_outcome(), None);
+        lock(state()).outcome = Some(Outcome::UpToDate);
+        assert_eq!(take_notified_outcome(), Some(Outcome::UpToDate));
+        assert_eq!(take_notified_outcome(), None);
+    }
+
+    #[test]
+    fn run_should_time_out_a_hung_command() {
+        let started = Instant::now();
+        let err = run("/bin/sleep", &["5".as_ref()], Duration::from_millis(100)).unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

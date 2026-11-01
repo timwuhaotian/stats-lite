@@ -205,12 +205,13 @@ pub unsafe fn show(mtm: MainThreadMarker, target: *const AnyObject) {
 
 /// Follows an open manual check; a completed check reopens a window hidden with Hide.
 pub fn refresh(mtm: MainThreadMarker) {
-    let outcome = update::take_notified_outcome();
     WINDOW.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(window) = slot.as_mut() else {
             return;
         };
+        // Only once a window exists to show it: taking it earlier would drop it.
+        let outcome = update::take_notified_outcome();
         if let Some(outcome) = outcome {
             window.render(match outcome {
                 Outcome::Ready(version) => Shown::Ready(version),

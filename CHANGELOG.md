@@ -4,10 +4,16 @@ Notable changes to stats-lite. Versions match `Cargo.toml` and the app's Info.pl
 
 ## Unreleased
 
+## 0.2.3 — 2026-11-01
+
 - **Disk % now agrees with `df` and Storage settings.** It reads the Data
   volume (`/System/Volumes/Data`, falling back to `/` on layouts without
   one) with `statfs`, so purgeable space no longer counts as free — the
   number that showed ~40% now shows the ~50% the system reports.
+- **Update checks can't hang forever.** A finished check's result can no longer
+  be swallowed before the update window shows it, and every external tool a
+  check runs (curl, codesign, spctl, hdiutil, …) now times out and fails the
+  check instead of leaving it on “Checking for updates…”.
 
 ## 0.2.2 — 2026-10-29
 
