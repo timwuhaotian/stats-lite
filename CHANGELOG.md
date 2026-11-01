@@ -4,6 +4,16 @@ Notable changes to stats-lite. Versions match `Cargo.toml` and the app's Info.pl
 
 ## Unreleased
 
+## 0.2.5 — 2026-11-01
+
+- **Update checks no longer report a just-released version as "up to date".**
+  The check read `releases/latest.toml` from `raw.githubusercontent.com`,
+  whose CDN caches that path for five minutes after a release is pushed —
+  a 0.2.3 copy checking right after 0.2.4 shipped was served the old
+  manifest and concluded it was current. The manifest now comes from the
+  GitHub API, and the DMG's checksum, version, signature and notarization
+  checks are unchanged.
+
 ## 0.2.4 — 2026-11-01
 
 - **Disk % no longer looks stuck.** It now shows one decimal (e.g. `48.7%`):

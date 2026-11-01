@@ -19,9 +19,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Raw from `main`, where the release commit puts the DMG and this file together.
+/// From `main`, where the release commit puts the DMG and this file together.
+/// Via the API, not `raw.githubusercontent.com`: Fastly caches that by path for
+/// 300s and ignores query strings, so a check right after a release saw the old
+/// manifest (0.2.3) and reported it as the newest version.
 const MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/timwuhaotian/stats-lite/main/releases/latest.toml";
+    "https://api.github.com/repos/timwuhaotian/stats-lite/contents/releases/latest.toml?ref=main";
 const DMG_URL: &str =
     "https://github.com/timwuhaotian/stats-lite/raw/main/releases/StatsLite-arm64.dmg";
 
@@ -538,6 +541,9 @@ fn fetch_manifest(url: &str) -> Result<Manifest, String> {
             "-fsSL".as_ref(),
             "--max-time".as_ref(),
             "30".as_ref(),
+            // Without this the API answers JSON with base64, not the file.
+            "-H".as_ref(),
+            "Accept: application/vnd.github.raw+json".as_ref(),
             url.as_ref(),
         ],
         MANIFEST_TIMEOUT,
